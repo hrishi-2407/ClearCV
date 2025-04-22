@@ -1,0 +1,677 @@
+import streamlit as st
+import PyPDF2
+import docx
+import google.generativeai as genai
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import random  # For demo purposes only
+import os
+
+
+# Configure API
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# ------------------ Document Parsing ------------------
+def parse_pdf(file):
+    pdf_reader = PyPDF2.PdfReader(file)
+    text = ""
+    for page in pdf_reader.pages:
+        text += page.extract_text() + "\n"
+    return text
+
+def parse_docx(file):
+    doc = docx.Document(file)
+    text = "\n".join([para.text for para in doc.paragraphs])
+    return text
+
+def parse_document(uploaded_file):
+    file_type = uploaded_file.name.split('.')[-1].lower()
+    if file_type == 'pdf':
+        text = parse_pdf(uploaded_file)
+        return text
+    elif file_type in ['doc', 'docx']:
+        text = parse_docx(uploaded_file)
+        return text
+    else:
+        st.error("Unsupported file format. Please upload a PDF or DOCX file.")
+        return None
+
+# ------------------ Anomaly Detection with Enhanced Output ------------------
+def analyze_resume(resume_text):
+    prompt = f'''
+You are an expert resume reviewer for recruiters.
+
+Evaluate the resume below against 15 predefined checks. For each check:
+1. Determine if it passes (✅) or fails (❌)
+2. Provide a brief explanation of the issue if it fails
+3. Rate the severity of each failed check on a scale of 1-10 (1=minor, 10=critical)
+4. Suggest a specific fix for each failed check
+5. Explain why this issue matters to recruiters
+
+Resume Text:
+"""
+{resume_text}
+"""
+
+For each of the 15 checks below, return a JSON object with these fields:
+- check_name: The name of the check
+- passed: true/false
+- explanation: Brief explanation if failed (empty string if passed)
+- severity: Number 1-10 if failed (0 if passed)
+- fix_suggestion: Specific recommendation to fix (empty string if passed)
+- recruiter_impact: How this affects hiring decisions (empty string if passed)
+- category: One of: "Content", "Format", "Consistency", "Relevance", "Credibility"
+
+Here are the 15 checks:
+1. Grammar or spelling mistakes (e.g., typos, punctuation issues, incorrect verb usage)
+2. Filler or vague phrases (e.g., "hardworking," "motivated," "go-getter")
+3. Repeated phrases (copy-pasted bullet points or phrases)
+4. Missing contact information (check if email, mobile number is present)
+5. Missing key sections (e.g., no experience, no education, no projects, no certifications)
+6. Unexplained employment gaps (look for large gaps between jobs without explanation)
+7. Frequent job switching (many jobs with tenure < 8 months)
+8. Experience and skills mismatch (skills listed doesn't align with the job role)
+9. Use of outdated technologies (e.g., php, adobe flash, older languages/tools not used today)
+10. Lack of measurable achievements (Simply listing responsibilities without highlighting quantifiable, missing performance metrics like %s or KPIs)
+11. Education and experience mismatch (e.g., studied biology but working in software without explanation)
+12. Irrelevant experience (e.g., job roles that don't relate to the field)
+13. Role-skill mismatch (e.g., job is "Data Scientist" but no data tools in skills)
+14. Inconsistent formatting (inconsistent bullet points, dates, etc.)
+15. Formatting or layout issues (inconsistent fonts, margins, bullet usage)
+
+Return the results as a JSON array of 15 objects, one for each check, following the format specified above.
+'''
+
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(prompt)
+        content = response.text
+        
+        # Extract the JSON part of the response
+        import json
+        import re
+        
+        # Try to find JSON in the response
+        json_match = re.search(r'\[.*\]', content, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+            results = json.loads(json_str)
+        else:
+            # Fallback to parsing the whole response as JSON
+            try:
+                results = json.loads(content)
+            except:
+                st.error("Failed to parse LLM response as JSON. Using text format instead.")
+                # Return raw text if JSON parsing failed
+                return {"raw_text": content, "parsed": False}
+        
+        return {"results": results, "parsed": True}
+    except Exception as e:
+        st.error(f"Error in LLM analysis: {e}")
+        return {"raw_text": str(e), "parsed": False}
+
+# ------------------ Visualization Functions ------------------
+def create_resume_health_gauge(overall_score):
+    fig = go.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = overall_score,
+        domain = {'x': [0, 1], 'y': [0, 1]},
+        title = {'text': "Resume Health Score"},
+        gauge = {
+            'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
+            'bar': {'color': "darkblue"},
+            'bgcolor': "white",
+            'borderwidth': 2,
+            'bordercolor': "gray",
+            'steps': [
+                {'range': [0, 40], 'color': 'red'},
+                {'range': [40, 70], 'color': 'yellow'},
+                {'range': [70, 100], 'color': 'green'}],
+            'threshold': {
+                'line': {'color': "red", 'width': 4},
+                'thickness': 0.75,
+                'value': overall_score}
+        }
+    ))
+    
+    fig.update_layout(height=250, margin=dict(l=20, r=20, t=50, b=20))
+    return fig
+
+def create_category_radar_chart(category_scores):
+    categories = list(category_scores.keys())
+    values = list(category_scores.values())
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatterpolar(
+        r=values,
+        theta=categories,
+        fill='toself',
+        name='Resume Performance'
+    ))
+    
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100]
+            )),
+        showlegend=False,
+        height=350,
+        margin=dict(l=80, r=80, t=20, b=20)
+    )
+    return fig
+
+def create_severity_breakdown(results):
+    # Group anomalies by severity level
+    severity_levels = {
+        "Critical (8-10)": 0,
+        "Moderate (4-7)": 0, 
+        "Minor (1-3)": 0,
+        "No Issues": 0
+    }
+    
+    for check in results:
+        if not check['passed']:
+            if check['severity'] >= 8:
+                severity_levels["Critical (8-10)"] += 1
+            elif check['severity'] >= 4:
+                severity_levels["Moderate (4-7)"] += 1
+            else:
+                severity_levels["Minor (1-3)"] += 1
+        else:
+            severity_levels["No Issues"] += 1
+    
+    # Create horizontal bar chart
+    fig = go.Figure()
+    colors = ['red', 'orange', 'yellow', 'green']
+    
+    for i, (level, count) in enumerate(severity_levels.items()):
+        fig.add_trace(go.Bar(
+            y=[level],
+            x=[count],
+            orientation='h',
+            marker=dict(color=colors[i]),
+            name=level
+        ))
+    
+    fig.update_layout(
+        title="Anomaly Severity Breakdown",
+        xaxis_title="Number of Checks",
+        height=250,
+        margin=dict(l=20, r=20, t=50, b=20),
+        barmode='stack'
+    )
+    
+    return fig
+
+def create_section_heatmap(results):
+    # Define resume sections and their corresponding checks
+    sections = {
+        "Contact Information": [3],  # Check index 4 (Missing contact information)
+        "Formatting & Layout": [0, 13, 14],  # Checks 1, 14, 15
+        "Content Quality": [1, 2, 9],  # Checks 2, 3, 10
+        "Experience": [5, 6, 7, 11],  # Checks 6, 7, 8, 12
+        "Education": [4, 10],  # Checks 5, 11  
+        "Skills & Tech": [8, 12]  # Checks 9, 13
+    }
+    
+    # Calculate severity score for each section
+    section_scores = {}
+    for section, check_indices in sections.items():
+        total_severity = 0
+        for idx in check_indices:
+            if idx < len(results) and not results[idx]['passed']:
+                total_severity += results[idx]['severity']
+        # Normalize by number of checks in this section
+        section_scores[section] = min(100, (total_severity / len(check_indices)) * 10)
+    
+    # Create section severity dataframe
+    df = pd.DataFrame([
+        {"Section": section, "Severity": score} 
+        for section, score in section_scores.items()
+    ])
+    
+    # Create visual heatmap of resume sections
+    fig = px.bar(
+        df, 
+        x="Severity", 
+        y="Section", 
+        orientation='h',
+        color="Severity",
+        color_continuous_scale=["green", "yellow", "red"],
+        range_color=[0, 100]
+    )
+    
+    fig.update_layout(
+        title="Resume Section Analysis",
+        height=300,
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    
+    return fig
+
+def calculate_overall_score(results):
+    """Calculate overall resume score based on anomaly findings"""
+    if not results:
+        return 0
+    
+    # Calculate base score (100 - deductions)
+    base_score = 100
+    passed_count = sum(1 for check in results if check['passed'])
+    
+    # Calculate severity-weighted deductions
+    total_severity = sum(check['severity'] for check in results if not check['passed'])
+    
+    # Adjust score based on severity and pass rate
+    score = base_score - (total_severity * 1.2)
+    score = max(0, min(100, score))  # Ensure score stays between 0-100
+    
+    return round(score, 1)
+
+def calculate_category_scores(results):
+    """Calculate scores by category"""
+    categories = {
+        "Content": [],
+        "Format": [],
+        "Consistency": [],
+        "Relevance": [],
+        "Credibility": []
+    }
+    
+    # Group checks by category
+    for check in results:
+        if check['category'] in categories:
+            categories[check['category']].append(check)
+    
+    # Calculate score for each category
+    category_scores = {}
+    for category, checks in categories.items():
+        if not checks:
+            category_scores[category] = 100
+            continue
+            
+        passed = sum(1 for check in checks if check['passed'])
+        total = len(checks)
+        
+        # Calculate severity deduction
+        severity_sum = sum(check['severity'] for check in checks if not check['passed'])
+        severity_deduction = severity_sum * (10 / total)
+        
+        # Base score based on pass rate plus severity deduction
+        score = 100 * (passed / total)
+        score = max(0, score - severity_deduction)
+        
+        category_scores[category] = round(score, 1)
+    
+    return category_scores
+
+def generate_recruiter_insights(results):
+    """Generate key insights for recruiters based on analysis"""
+    insights = []
+    
+    # Check for deal-breakers (severity >= 8)
+    deal_breakers = [check for check in results if not check['passed'] and check['severity'] >= 8]
+    if deal_breakers:
+        insights.append({
+            "type": "critical",
+            "title": "Critical Issues Detected",
+            "description": f"Found {len(deal_breakers)} critical issues that may significantly impact candidate viability.",
+            "items": [f"{check['check_name']}: {check['explanation']}" for check in deal_breakers]
+        })
+    
+    # Check for potential red flags (severity 5-7)
+    red_flags = [check for check in results if not check['passed'] and 5 <= check['severity'] < 8]
+    if red_flags:
+        insights.append({
+            "type": "warning",
+            "title": "Potential Red Flags",
+            "description": f"Found {len(red_flags)} issues that warrant further discussion with the candidate.",
+            "items": [f"{check['check_name']}: {check['explanation']}" for check in red_flags]
+        })
+    
+    # Check for strengths (areas with no issues)
+    strengths = []
+    if any(check['passed'] for check in results if check['category'] == "Content"):
+        strengths.append("Well-written content")
+    if all(check['passed'] for check in results if check['check_name'] in ["Missing contact information", "Missing key sections"]):
+        strengths.append("Complete profile with all essential information")
+    if all(check['passed'] for check in results if check['check_name'] in ["Experience and skills mismatch", "Role-skill mismatch"]):
+        strengths.append("Strong alignment between experience and skills")
+    
+    if strengths:
+        insights.append({
+            "type": "positive",
+            "title": "Resume Strengths",
+            "description": "Key positive aspects of this resume:",
+            "items": strengths
+        })
+    
+    # Generate interview recommendations
+    interview_questions = []
+    for check in results:
+        if not check['passed'] and check['severity'] >= 5:
+            if check['check_name'] == "Unexplained employment gaps":
+                interview_questions.append(f"Ask about the gap between positions: \"{check['explanation']}\"")
+            elif check['check_name'] == "Education and experience mismatch":
+                interview_questions.append(f"Explore transition from education to current career path: \"{check['explanation']}\"")
+            elif check['check_name'] == "Experience and skills mismatch":
+                interview_questions.append(f"Verify skill proficiency: \"{check['explanation']}\"")
+    
+    if interview_questions:
+        insights.append({
+            "type": "interview",
+            "title": "Suggested Interview Questions",
+            "description": "Based on resume anomalies, consider asking:",
+            "items": interview_questions
+        })
+    
+    return insights
+
+# ------------------ Main Application ------------------
+def main():
+    st.set_page_config(page_title="Resume Anomaly Analyzer Pro", layout="wide")
+    
+    # Custom CSS
+    st.markdown("""
+    <style>
+    .main {
+        background-color: #f5f7fa;
+    }
+    .stApp {
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    .insight-card {
+        padding: 15px;
+        border-radius: 5px;
+        margin-bottom: 10px;
+    }
+    .critical {
+        background-color: #ffecec;
+        border-left: 5px solid #ff6666;
+    }
+    .warning {
+        background-color: #fff8e6;
+        border-left: 5px solid #ffc107;
+    }
+    .positive {
+        background-color: #f0f8f0;
+        border-left: 5px solid #4CAF50;
+    }
+    .interview {
+        background-color: #e6f3ff;
+        border-left: 5px solid #2196F3;
+    }
+    .severity-high {
+        color: #d32f2f;
+        font-weight: bold;
+    }
+    .severity-medium {
+        color: #f57c00;
+        font-weight: bold;
+    }
+    .severity-low {
+        color: #7cb342;
+        font-weight: bold;
+    }
+    .metric-card {
+        background-color: white;
+        border-radius: 5px;
+        padding: 15px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+    }
+    .section-title {
+        font-size: 1.2rem;
+        font-weight: bold;
+        margin-bottom: 10px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # App Header
+    col1, col2 = st.columns([1, 5])
+    with col1:
+        st.image("https://img.icons8.com/fluency/96/000000/resume.png", width=80)
+    with col2:
+        st.title("Resume Anomaly Analyzer Pro")
+        st.markdown("#### _Advanced insights for recruiters and HR professionals_")
+    
+    st.markdown("---")
+    
+    # File Upload Section
+    uploaded_file = st.file_uploader("Upload Resume (PDF or DOC/DOCX)", type=["pdf", "docx"])
+    
+    if uploaded_file:
+        # Mock data for demonstration - remove in production
+        demo_mode = st.checkbox("Use demo data for visualization", value=False)
+        
+        if st.button("Analyze Resume"):
+            with st.spinner("Analyzing resume... This may take a moment."):
+                # Parse document
+                resume_text = parse_document(uploaded_file)
+                
+                if resume_text:
+                    # Call LLM for analysis
+                    analysis = analyze_resume(resume_text)
+                    
+                    # Check if parsing was successful
+                    if not analysis["parsed"]:
+                        st.error("Failed to parse analysis results. Please try again.")
+                        st.text(analysis["raw_text"])
+                    else:
+                        results = analysis["results"]
+                        
+                        # Use mock data if in demo mode
+                        if demo_mode:
+                            # Generate mock data for demonstration
+                            results = []
+                            categories = ["Content", "Format", "Consistency", "Relevance", "Credibility"]
+                            
+                            for i, check in enumerate([
+                                "Grammar or spelling mistakes", 
+                                "Filler or vague phrases",
+                                "Repeated phrases",
+                                "Missing contact information",
+                                "Missing key sections",
+                                "Unexplained employment gaps",
+                                "Frequent job switching",
+                                "Experience and skills mismatch",
+                                "Use of outdated technologies",
+                                "Lack of measurable achievements",
+                                "Education and experience mismatch",
+                                "Irrelevant experience",
+                                "Role-skill mismatch",
+                                "Inconsistent formatting",
+                                "Formatting or layout issues"
+                            ]):
+                                # Randomly determine pass/fail
+                                passed = random.choice([True, False])
+                                severity = 0 if passed else random.randint(1, 10)
+                                
+                                results.append({
+                                    "check_name": check,
+                                    "passed": passed,
+                                    "explanation": "" if passed else f"Found issues with {check.lower()}",
+                                    "severity": severity,
+                                    "fix_suggestion": "" if passed else f"Consider revising {check.lower()}",
+                                    "recruiter_impact": "" if passed else f"This may affect how recruiters perceive candidate's attention to detail",
+                                    "category": random.choice(categories)
+                                })
+                        
+                        # Calculate overall score and category scores
+                        overall_score = calculate_overall_score(results)
+                        category_scores = calculate_category_scores(results)
+                        
+                        # Generate insights
+                        recruiter_insights = generate_recruiter_insights(results)
+                        
+                        # Display dashboard layout
+                        st.success("Analysis complete! Here's what we found:")
+                        
+                        # Top metrics
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.markdown("""
+                            <div class="metric-card">
+                                <div class="section-title">Resume Health Score</div>
+                            """, unsafe_allow_html=True)
+                            st.plotly_chart(create_resume_health_gauge(overall_score))
+                            st.markdown("</div>", unsafe_allow_html=True)
+                            
+                        with col2:
+                            st.markdown("""
+                            <div class="metric-card">
+                                <div class="section-title">Category Performance</div>
+                            """, unsafe_allow_html=True)
+                            st.plotly_chart(create_category_radar_chart(category_scores))
+                            st.markdown("</div>", unsafe_allow_html=True)
+                            
+                        with col3:
+                            st.markdown("""
+                            <div class="metric-card">
+                                <div class="section-title">Anomaly Severity</div>
+                            """, unsafe_allow_html=True)
+                            st.plotly_chart(create_severity_breakdown(results))
+                            st.markdown("</div>", unsafe_allow_html=True)
+                        
+                        # Resume section heatmap
+                        st.markdown("""
+                        <div class="metric-card">
+                            <div class="section-title">Resume Section Analysis</div>
+                        """, unsafe_allow_html=True)
+                        st.plotly_chart(create_section_heatmap(results))
+                        st.markdown("</div>", unsafe_allow_html=True)
+                        
+                        # Display insights for recruiters
+                        st.markdown("### Key Insights for Recruiters")
+                        
+                        for insight in recruiter_insights:
+                            st.markdown(f"""
+                            <div class="insight-card {insight['type']}">
+                                <h4>{insight['title']}</h4>
+                                <p>{insight['description']}</p>
+                                <ul>
+                                    {"".join(f"<li>{item}</li>" for item in insight['items'])}
+                                </ul>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        # Detailed anomaly breakdown
+                        st.markdown("### Detailed Anomaly Analysis")
+                        
+                        # Create tabs for different views
+                        tab1, tab2 = st.tabs(["All Checks", "Failed Checks Only"])
+                        
+                        with tab1:
+                            for check in results:
+                                if check['passed']:
+                                    st.markdown(f"✅ **{check['check_name']}**")
+                                else:
+                                    # Determine severity class
+                                    severity_class = "severity-low"
+                                    if check['severity'] >= 8:
+                                        severity_class = "severity-high"
+                                    elif check['severity'] >= 4:
+                                        severity_class = "severity-medium"
+                                    
+                                    st.markdown(f"""
+                                    ❌ **{check['check_name']}** <span class="{severity_class}">
+                                    (Severity: {check['severity']}/10)</span>  
+                                    • **Issue:** {check['explanation']}
+                                    • **Why It Matters:** {check['recruiter_impact']}
+                                    • **Suggested Fix:** {check['fix_suggestion']}
+                                    """, unsafe_allow_html=True)
+                                    
+                                    st.markdown("---")
+                        
+                        with tab2:
+                            failed_checks = [check for check in results if not check['passed']]
+                            
+                            if not failed_checks:
+                                st.success("No issues found! This resume passed all checks.")
+                            else:
+                                # Group by severity
+                                critical = [c for c in failed_checks if c['severity'] >= 8]
+                                moderate = [c for c in failed_checks if 4 <= c['severity'] < 8]
+                                minor = [c for c in failed_checks if c['severity'] < 4]
+                                
+                                if critical:
+                                    st.markdown("#### Critical Issues")
+                                    for check in critical:
+                                        st.markdown(f"""
+                                        ❌ **{check['check_name']}** <span class="severity-high">
+                                        (Severity: {check['severity']}/10)</span>
+                                        
+                                        • **Issue:** {check['explanation']}
+                                        • **Why It Matters:** {check['recruiter_impact']}
+                                        • **Suggested Fix:** {check['fix_suggestion']}
+                                        """, unsafe_allow_html=True)
+                                        st.markdown("---")
+                                
+                                if moderate:
+                                    st.markdown("#### Moderate Issues")
+                                    for check in moderate:
+                                        st.markdown(f"""
+                                        ❌ **{check['check_name']}** <span class="severity-medium">
+                                        (Severity: {check['severity']}/10)</span>
+                                        
+                                        • **Issue:** {check['explanation']}
+                                        • **Why It Matters:** {check['recruiter_impact']}
+                                        • **Suggested Fix:** {check['fix_suggestion']}
+                                        """, unsafe_allow_html=True)
+                                        st.markdown("---")
+                                
+                                if minor:
+                                    st.markdown("#### Minor Issues")
+                                    for check in minor:
+                                        st.markdown(f"""
+                                        ❌ **{check['check_name']}** <span class="severity-low">
+                                        (Severity: {check['severity']}/10)</span>
+                                        
+                                        • **Issue:** {check['explanation']}
+                                        • **Why It Matters:** {check['recruiter_impact']}
+                                        • **Suggested Fix:** {check['fix_suggestion']}
+                                        """, unsafe_allow_html=True)
+                                        st.markdown("---")
+                        
+                        # Export options
+                        st.markdown("### Export Options")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.download_button(
+                                "Download Detailed Report (PDF)",
+                                "Report functionality would be implemented here",
+                                file_name="resume_analysis_report.pdf",
+                                mime="application/pdf"
+                            )
+                        with col2:
+                            st.download_button(
+                                "Export Analysis Data (JSON)",
+                                "JSON export functionality would be implemented here",
+                                file_name="resume_analysis_data.json",
+                                mime="application/json"
+                            )
+    
+    else:
+        # Show sample visualizations or instructions when no file is uploaded
+        st.info("Upload a resume to begin analysis.")
+        st.markdown("""
+        ### How It Works
+        
+        1. **Upload** your candidate's resume (PDF or DOCX)
+        2. **Analyze** to detect anomalies across 15 key dimensions
+        3. **Review** visual insights and severity scores
+        4. **Take action** based on recommended next steps
+        
+        This tool helps recruiters quickly identify potential issues in resumes, prioritize concerns, and make more informed decisions about candidates.
+        """)
+
+if __name__ == "__main__":
+    main()
