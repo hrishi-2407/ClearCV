@@ -11,9 +11,9 @@ Resume Anomaly Analyzer is a privacy-focused AI tool designed to assist recruite
 
 -🔍 Anomaly Detection: Identifies grammar mistakes, outdated technologies, filler phrases, employment gaps, irrelevant experience, and missing information.
 -✅ Detects grammar and spelling errors
--✅ Flags filler phrases and corporate buzzwords
--✅ Identifies outdated technologies
--✅ Highlights job gaps and frequent switches
+- ✅ Flags filler phrases and corporate buzzwords
+- ✅ Identifies outdated technologies
+- ✅ Highlights job gaps and frequent switches
 -✅ Finds missing sections (education, projects, certifications)
 -✅ Checks alignment between roles, skills, and education
 -✅ Estimates page length and formatting issues
